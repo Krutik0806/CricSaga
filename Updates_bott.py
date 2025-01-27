@@ -455,20 +455,20 @@ class DatabaseHandler:
         self._init_tables()  # Add this line to initialize tables
 
     async def init_pool():
-    try:
-        pool = await asyncpg.create_pool(
-            host=os.getenv("DB_HOST"),  # Supabase host
-            database=os.getenv("DB_NAME"),  # Supabase database name
-            user=os.getenv("DB_USER"),  # Supabase user
-            password=os.getenv("DB_PASSWORD"),  # Supabase password
-            port=int(os.getenv("DB_PORT")),  # Supabase port
-            ssl="require"  # Ensure SSL for Supabase
-        )
-        print("Connected to the database successfully!")
-        return pool
-    except Exception as e:
-        print(f"Failed to connect to the database: {e}")
-        raise
+        try:
+            pool = await asyncpg.create_pool(
+                host=os.getenv("DB_HOST"),  # Supabase host
+                database=os.getenv("DB_NAME"),  # Supabase database name
+                user=os.getenv("DB_USER"),  # Supabase user
+                password=os.getenv("DB_PASSWORD"),  # Supabase password
+                port=int(os.getenv("DB_PORT")),  # Supabase port
+                ssl="require"  # Ensure SSL for Supabase
+            )
+            print("Connected to the database successfully!")
+            return pool
+        except Exception as e:
+            print(f"Failed to connect to the database: {e}")
+            raise
     def check_connection(self) -> bool:
         """Test database connection"""
         if not self.pool:
