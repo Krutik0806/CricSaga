@@ -80,10 +80,15 @@ DB_CONFIG = {
     'dbname': os.getenv('DB_NAME', 'postgres'),
     'user': os.getenv('DB_USER'),
     'password': os.getenv('DB_PASSWORD'),
-    'host': os.getenv('DB_HOST'),
+    'host': os.getenv('DB_HOST', 'localhost'),  # Make sure this is correct
     'port': int(os.getenv('DB_PORT', '5432')),
-    'connect_timeout': 10
-    
+    'connect_timeout': 30,  # Increased timeout
+    'sslmode': 'require',  # Required for most cloud hosting
+    'keepalives': 1,
+    'keepalives_idle': 30,
+    'keepalives_interval': 10,
+    'keepalives_count': 5,
+    'client_encoding': 'utf8'
 }
 
 # Add near the top with other constants
@@ -93,13 +98,9 @@ db_pool = None
 
 
 def init_db_pool():
-    """Initialize database connection pool"""
+    """Initialize database connection pool with better error handling"""
     global db_pool
     try:
-        if not all([DB_CONFIG['user'], DB_CONFIG['password'], DB_CONFIG['host']]):
-            logger.error("Database configuration missing. Please check your .env file")
-            return False
-            
         db_pool = SimpleConnectionPool(
             DB_POOL_MIN,
             DB_POOL_MAX,
@@ -485,25 +486,41 @@ class DatabaseHandler:
     def _init_pool(self) -> bool:
         """Initialize connection pool with proper error handling"""
         try:
-            # Get Supabase credentials from environment
-            db_config = {
-                'dbname': os.getenv('DB_NAME', 'postgres'),
-                'user': os.getenv('DB_USER'),
-                'password': os.getenv('DB_PASSWORD'),
-                'host': os.getenv('DB_HOST'),
-                'port': int(os.getenv('DB_PORT', '5432')),
-                'sslmode': 'require'
-            }
-
-            # Create connection pool
-            self.pool = SimpleConnectionPool(
-                1,  # Minimum connections
-                20, # Maximum connections
-                **db_config
-            )
+            if not all([DB_CONFIG['user'], DB_CONFIG['password'], DB_CONFIG['host']]):
+                logger.error("Database configuration missing. Check your .env file")
+                return False
+                
+            # Create connection pool with retry logic
+            retry_count = 0
+            max_retries = 3
             
-            logger.info("Database pool initialized successfully")
-            return self._verify_tables()  # Verify tables after pool initialization
+            while retry_count < max_retries:
+                try:
+                    self.pool = SimpleConnectionPool(
+                        DB_POOL_MIN,
+                        DB_POOL_MAX,
+                        **DB_CONFIG
+                    )
+                    
+                    # Test the connection
+                    test_conn = self.pool.getconn()
+                    with test_conn.cursor() as cur:
+                        cur.execute('SELECT 1')
+                    self.pool.putconn(test_conn)
+                    
+                    logger.info("Database pool created successfully")
+                    return True
+                    
+                except Exception as e:
+                    retry_count += 1
+                    logger.error(f"Connection attempt {retry_count} failed: {e}")
+                    if retry_count < max_retries:
+                        time.sleep(5)  # Wait 5 seconds before retrying
+                        continue
+                    break
+                    
+            logger.error("Failed to create connection pool after all retries")
+            return False
             
         except Exception as e:
             logger.error(f"Failed to create connection pool: {e}")
@@ -2943,14 +2960,28 @@ def init_database_connection():
     """Initialize database connection with better error handling"""
     global db
     try:
-        db = DatabaseHandler()
-        if not db.check_connection():
-            logger.error("Could not establish database connection")
-            return False
-            
-        # Simply return true if connected - don't execute any SQL files
-        logger.info("Successfully connected to database")
-        return True
+        # Add retries for initial connection
+        max_retries = 3
+        retry_delay = 5
+        
+        for attempt in range(max_retries):
+            try:
+                db = DatabaseHandler()
+                if db.check_connection():
+                    logger.info("Successfully connected to database")
+                    return True
+                    
+                logger.warning(f"Connection attempt {attempt + 1} failed, retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+                
+            except Exception as e:
+                logger.error(f"Database connection attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                continue
+                
+        logger.error("All database connection attempts failed")
+        return False
         
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
@@ -3333,5 +3364,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
