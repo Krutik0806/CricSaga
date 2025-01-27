@@ -1,9 +1,3 @@
--- Drop existing tables if they exist (be careful with this in production!)
-DROP TABLE IF EXISTS scorecards;
-DROP TABLE IF EXISTS command_logs;
-DROP TABLE IF EXISTS users;
-DROP TABLE IF EXISTS player_stats;
-DROP TABLE IF EXISTS match_performances;
 
 -- Create users table
 CREATE TABLE users (
