@@ -83,6 +83,7 @@ DB_CONFIG = {
     'host': os.getenv('DB_HOST'),
     'port': int(os.getenv('DB_PORT', '5432')),
     'connect_timeout': 10
+    
 }
 
 # Add near the top with other constants
@@ -91,21 +92,25 @@ DB_POOL_MAX = 20
 db_pool = None
 
 
-async def init_db_pool():
+def init_db_pool():
+    """Initialize database connection pool"""
+    global db_pool
     try:
-        pool = await asyncpg.create_pool(
-            host=os.getenv("DB_HOST"),  # Supabase host
-            database=os.getenv("DB_NAME"),  # Supabase database name
-            user=os.getenv("DB_USER"),  # Supabase user
-            password=os.getenv("DB_PASSWORD"),  # Supabase password
-            port=int(os.getenv("DB_PORT")),  # Supabase port
-            ssl="require"  # Ensure SSL for Supabase
+        if not all([DB_CONFIG['user'], DB_CONFIG['password'], DB_CONFIG['host']]):
+            logger.error("Database configuration missing. Please check your .env file")
+            return False
+            
+        db_pool = SimpleConnectionPool(
+            DB_POOL_MIN,
+            DB_POOL_MAX,
+            **DB_CONFIG
         )
-        print("Connected to the database successfully!")
-        return pool
+        logger.info("Connection pool created successfully")
+        return True
     except Exception as e:
-        print(f"Failed to connect to the database: {e}")
-        raise
+        logger.error(f"Failed to create connection pool: {e}")
+        return False
+
 
 def check_admin(user_id: str) -> bool:
     """Check if user is an admin"""
@@ -452,23 +457,59 @@ class DatabaseHandler:
     def __init__(self):
         self.pool = None
         self._init_pool()
-        self._init_tables()  # Add this line to initialize tables
-
-    async def init_pool():
+        # Only create tables if they don't exist - don't reset them
+        if not self._verify_tables():
+            self._init_tables()
+        self.load_registered_users()  # Add this line
+        
+    def load_registered_users(self):
+        """Load registered users from database into memory"""
+        global REGISTERED_USERS
         try:
-            pool = await asyncpg.create_pool(
-                host=os.getenv("DB_HOST"),  # Supabase host
-                database=os.getenv("DB_NAME"),  # Supabase database name
-                user=os.getenv("DB_USER"),  # Supabase user
-                password=os.getenv("DB_PASSWORD"),  # Supabase password
-                port=int(os.getenv("DB_PORT")),  # Supabase port
-                ssl="require"  # Ensure SSL for Supabase
-            )
-            print("Connected to the database successfully!")
-            return pool
+            conn = self.get_connection()
+            if not conn:
+                return
+                
+            with conn.cursor() as cur:
+                cur.execute("SELECT telegram_id FROM users")
+                users = cur.fetchall()
+                for user in users:
+                    REGISTERED_USERS.add(str(user[0]))
+                logger.info(f"Loaded {len(REGISTERED_USERS)} registered users from database")
         except Exception as e:
-            print(f"Failed to connect to the database: {e}")
-            raise
+            logger.error(f"Error loading registered users: {e}")
+        finally:
+            if conn:
+                self.return_connection(conn)
+
+    def _init_pool(self) -> bool:
+        """Initialize connection pool with proper error handling"""
+        try:
+            # Get Supabase credentials from environment
+            db_config = {
+                'dbname': os.getenv('DB_NAME', 'postgres'),
+                'user': os.getenv('DB_USER'),
+                'password': os.getenv('DB_PASSWORD'),
+                'host': os.getenv('DB_HOST'),
+                'port': int(os.getenv('DB_PORT', '5432')),
+                'sslmode': 'require'
+            }
+
+            # Create connection pool
+            self.pool = SimpleConnectionPool(
+                1,  # Minimum connections
+                20, # Maximum connections
+                **db_config
+            )
+            
+            logger.info("Database pool initialized successfully")
+            return self._verify_tables()  # Verify tables after pool initialization
+            
+        except Exception as e:
+            logger.error(f"Failed to create connection pool: {e}")
+            self.pool = None
+            return False
+
     def check_connection(self) -> bool:
         """Test database connection"""
         if not self.pool:
@@ -544,7 +585,10 @@ class DatabaseHandler:
                         RETURNING telegram_id
                     """, (telegram_id, username, first_name))
                     conn.commit()
-                    return cur.fetchone() is not None
+                    
+                    # Add to in-memory set
+                    REGISTERED_USERS.add(str(telegram_id))
+                    return True
             finally:
                 self.return_connection(conn)
                 
@@ -723,45 +767,69 @@ class DatabaseHandler:
             logger.error(f"Error getting user matches: {e}")
             return []
     def _init_tables(self) -> bool:
-        """Initialize database tables"""
+        """Initialize database tables only if they don't exist"""
         try:
             conn = self.get_connection()
             if not conn:
                 return False
 
             with conn.cursor() as cur:
-                # Create users table
+                # Check if tables exist first
                 cur.execute("""
-                    CREATE TABLE IF NOT EXISTS users (
-                        telegram_id BIGINT PRIMARY KEY,
-                        username VARCHAR(255),
-                        first_name VARCHAR(255),
-                        registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = 'users'
+                    ), EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = 'scorecards'
+                    );
                 """)
+                users_exist, scorecards_exist = cur.fetchone()
 
-                # Create scorecards table
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS scorecards (
-                        id SERIAL PRIMARY KEY,
-                        match_id VARCHAR(50) UNIQUE NOT NULL,
-                        user_id BIGINT REFERENCES users(telegram_id),
-                        game_mode VARCHAR(50),
-                        teams TEXT,
-                        first_innings TEXT,
-                        second_innings TEXT,
-                        first_innings_wickets INTEGER,
-                        second_innings_wickets INTEGER,
-                        result TEXT,
-                        boundaries INTEGER DEFAULT 0,
-                        sixes INTEGER DEFAULT 0,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        match_data JSONB
-                    )
-                """)
+                # Only create tables if they don't exist
+                if not users_exist:
+                    logger.info("Creating users table...")
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS users (
+                            telegram_id BIGINT PRIMARY KEY,
+                            username VARCHAR(255),
+                            first_name VARCHAR(255),
+                            registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+
+                if not scorecards_exist:
+                    logger.info("Creating scorecards table...")
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS scorecards (
+                            id SERIAL PRIMARY KEY,
+                            match_id VARCHAR(50) UNIQUE NOT NULL,
+                            user_id BIGINT REFERENCES users(telegram_id),
+                            game_mode VARCHAR(50),
+                            teams TEXT,
+                            first_innings TEXT,
+                            second_innings TEXT,
+                            first_innings_wickets INTEGER,
+                            second_innings_wickets INTEGER,
+                            result TEXT,
+                            boundaries INTEGER DEFAULT 0,
+                            sixes INTEGER DEFAULT 0,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            match_data JSONB
+                        )
+                    """)
+
+                    # Create indices only if scorecards table was just created
+                    cur.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_scorecards_user_id ON scorecards(user_id);
+                        CREATE INDEX IF NOT EXISTS idx_scorecards_match_id ON scorecards(match_id);
+                    """)
+
                 conn.commit()
-                logger.info("Database tables initialized successfully")
+                logger.info("Database tables verified/created successfully")
                 return True
 
         except Exception as e:
@@ -818,78 +886,23 @@ class DatabaseHandler:
                 self.return_connection(conn)
 
     def _verify_tables(self) -> bool:
-        """Verify all required tables exist and create them if they don't"""
-        conn = None
+        """Check if required tables exist"""
         try:
             conn = self.get_connection()
             if not conn:
                 return False
 
             with conn.cursor() as cur:
-                # First check if tables exist
-                cur.execute("""
-                    SELECT EXISTS (
-                        SELECT FROM information_schema.tables 
-                        WHERE table_schema = 'public' 
-                        AND table_name = 'scorecards'
-                    );
-                """)
-                tables_exist = cur.fetchone()[0]
-
-                if not tables_exist:
-                    # Create tables if they don't exist
-                    logger.info("Creating required database tables...")
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS users (
-                            telegram_id BIGINT PRIMARY KEY,
-                            username VARCHAR(255),
-                            first_name VARCHAR(255),
-                            registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        );
-
-                        CREATE TABLE IF NOT EXISTS scorecards (
-                            id SERIAL PRIMARY KEY,
-                            match_id VARCHAR(50) UNIQUE NOT NULL,
-                            user_id BIGINT REFERENCES users(telegram_id),
-                            game_mode VARCHAR(50),
-                            teams TEXT,
-                            first_innings TEXT,
-                            second_innings TEXT,
-                            first_innings_wickets INTEGER,
-                            second_innings_wickets INTEGER,
-                            result TEXT,
-                            boundaries INTEGER DEFAULT 0,
-                            sixes INTEGER DEFAULT 0,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            match_data JSONB
-                        );
-
-                        CREATE INDEX IF NOT EXISTS idx_scorecards_user_id ON scorecards(user_id);
-                        CREATE INDEX IF NOT EXISTS idx_scorecards_match_id ON scorecards(match_id);
-                    """)
-                    conn.commit()
-                    logger.info("Database tables created successfully")
-
-                # Verify tables were created
                 cur.execute("""
                     SELECT COUNT(*) FROM information_schema.tables 
                     WHERE table_schema = 'public' 
                     AND table_name IN ('users', 'scorecards');
                 """)
-                table_count = cur.fetchone()[0]
-                
-                if table_count == 2:
-                    logger.info("All required tables exist")
-                    return True
-                else:
-                    logger.error("Failed to verify all tables exist")
-                    return False
+                count = cur.fetchone()[0]
+                return count == 2
 
         except Exception as e:
-            logger.error(f"Error verifying/creating tables: {e}")
-            if conn:
-                conn.rollback()
+            logger.error(f"Error verifying tables: {e}")
             return False
         finally:
             if conn:
@@ -971,7 +984,7 @@ def init_database():
     try:
         with connection.cursor() as cursor:
             # Read and execute the SQL file
-            sql_file_path = Path(__file__).parent / "setup_database.sql"
+            sql_file_path = Path(__file__).parent / "SETUP.sql"
             if not sql_file_path.exists():
                 logger.error("setup_database.sql file not found")
                 return False
@@ -1895,7 +1908,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != ChatType.PRIVATE:
         await update.message.reply_text(
             "❌ Please start me in private chat to register!\n"
-            "Click here: t.me/YourBotUsername"
+            "Click here: HII"
         )
         return
     
@@ -2935,35 +2948,14 @@ def init_database_connection():
             logger.error("Could not establish database connection")
             return False
             
-        # Run initial database setup
-        conn = db.get_connection()
-        if conn:
-            try:
-                # Read and execute SQL setup file
-
-                setup_file = Path(__file__).parent / 'setup_database.sql'
-                if setup_file.exists():
-                    with open(setup_file, 'r') as f:
-                        sql_setup = f.read()
-                        with conn.cursor() as cur:
-                            cur.execute(sql_setup)
-                            conn.commit()
-                            logger.info("Database tables created successfully")
-                else:
-                    logger.error("setup_database.sql file not found")
-                    return True
-            except Exception as e:
-                logger.error(f"Failed to initialize database tables: {e}")
-                return False
-            finally:
-                db.return_connection(conn)
-                
+        # Simply return true if connected - don't execute any SQL files
         logger.info("Successfully connected to database")
         return True
         
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
         return False
+    
 
 async def test_db_connection(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Test database connection and schema"""
@@ -3113,58 +3105,41 @@ async def view_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         conn = get_db_connection()
         if not conn:
-            await update.message.reply_text("Database connection error!")
+            await update.message.reply_text("❌ Database connection error")
             return
             
         with conn.cursor() as cur:
-            # Get player stats
+            # Use match_data instead of direct columns
             cur.execute("""
-                SELECT total_runs, total_wickets, total_matches, total_wins,
-                       total_boundaries, total_sixes, fifties, hundreds,
-                       best_score, best_wickets
-                FROM player_stats
-                WHERE telegram_id = %s
+                SELECT 
+                    COUNT(*) as matches,
+                    COUNT(DISTINCT match_id) as total_games,
+                    COALESCE(SUM((match_data->>'first_innings_wickets')::int), 0) + 
+                    COALESCE(SUM((match_data->>'second_innings_wickets')::int), 0) as total_wickets
+                FROM scorecards
+                WHERE user_id = %s
             """, (user_id,))
             
             stats = cur.fetchone()
             
             if not stats:
-                await update.message.reply_text(
-                    escape_markdown_v2_custom(
-                        "*🏏 No Stats Available*\n"
-                        "Play some matches to see your statistics!"
-                    ),
-                    parse_mode=ParseMode.MARKDOWN_V2
-                )
-                return
+                stats = (0, 0, 0)  # Default values if no stats
                 
             stats_msg = (
-                f"*🏏 Player Statistics*\n"
-                f"{MATCH_SEPARATOR}\n"
-                f"*📊 BATTING*\n"
-                f"• Total Runs: *{stats[0]}*\n"
-                f"• Boundaries: *{stats[4]}*\n"
-                f"• Sixes: *{stats[5]}*\n"
-                f"• Fifties: *{stats[6]}*\n"
-                f"• Hundreds: *{stats[7]}*\n"
-                f"• Best Score: *{stats[8]}*\n\n"
-                f"*🎯 BOWLING*\n"
-                f"• Wickets: *{stats[1]}*\n"
-                f"• Best Bowling: *{stats[9]}*\n\n"
-                f"*🎮 OVERALL*\n"
-                f"• Matches: *{stats[2]}*\n"
-                f"• Wins: *{stats[3]}*\n"
-                f"• Win Rate: *{(stats[3]/stats[2]*100):.1f}%*\n"
+                "🏏 Player Statistics\n"
+                "━━━━━━━━━━━━━━\n\n"
+                "📊 OVERVIEW\n"
+                f"• Total Matches: {stats[0]}\n"
+                f"• Games Played: {stats[1]}\n\n"
+                "🎯 BOWLING\n"
+                f"• Wickets: {stats[2]}\n"
             )
             
-            await update.message.reply_text(
-                escape_markdown_v2_custom(stats_msg),
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
+            await update.message.reply_text(stats_msg)
             
     except Exception as e:
         logger.error(f"Error fetching stats: {e}")
-        await update.message.reply_text("Error fetching statistics!")
+        await update.message.reply_text("❌ Error fetching statistics")
     finally:
         if conn:
             return_db_connection(conn)
@@ -3174,16 +3149,21 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         conn = get_db_connection()
         if not conn:
-            await update.message.reply_text("Database connection error!")
+            await update.message.reply_text("❌ Database connection error")
             return
             
         with conn.cursor() as cur:
-            # Get top 10 players by runs
+            # Use simpler query without complex joins
             cur.execute("""
-                SELECT u.first_name, ps.total_runs, ps.total_wickets, ps.total_wins
-                FROM player_stats ps
-                JOIN users u ON ps.telegram_id = u.telegram_id
-                ORDER BY ps.total_runs DESC
+                SELECT 
+                    u.first_name,
+                    COUNT(DISTINCT s.match_id) as matches,
+                    COALESCE(SUM((s.match_data->>'wickets')::int), 0) as wickets
+                FROM users u
+                LEFT JOIN scorecards s ON u.telegram_id = s.user_id
+                GROUP BY u.telegram_id, u.first_name
+                HAVING COUNT(DISTINCT s.match_id) > 0
+                ORDER BY matches DESC
                 LIMIT 10
             """)
             
@@ -3191,28 +3171,26 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if not leaders:
                 await update.message.reply_text(
-                    "*🏆 Leaderboard Empty*\n"
-                    "No matches played yet!",
-                    parse_mode=ParseMode.MARKDOWN_V2
+                    "🏆 Leaderboard Empty\nNo matches played yet!"
                 )
                 return
-                
-            leaderboard_msg = "*🏆 CRICKET LEADERBOARD*\n" + MATCH_SEPARATOR + "\n\n"
+
+            leaderboard_msg = (
+                "🏆 CRICKET LEADERBOARD\n"
+                "━━━━━━━━━━━━━━\n\n"
+            )
             
-            for idx, player in enumerate(leaders, 1):
+            for idx, (name, matches, wickets) in enumerate(leaders, 1):
                 leaderboard_msg += (
-                    f"*{idx}. {escape_html(player[0])}*\n"
-                    f"Runs: *{player[1]}* | Wickets: *{player[2]}* | Wins: *{player[3]}*\n\n"
+                    f"{idx}. {name}\n"
+                    f"Matches: {matches} | Wickets: {wickets}\n\n"
                 )
             
-            await update.message.reply_text(
-                escape_markdown_v2_custom(leaderboard_msg),
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
+            await update.message.reply_text(leaderboard_msg)
             
     except Exception as e:
         logger.error(f"Error fetching leaderboard: {e}")
-        await update.message.reply_text("Error fetching leaderboard!")
+        await update.message.reply_text("❌ Error fetching leaderboard")
     finally:
         if conn:
             return_db_connection(conn)
@@ -3224,18 +3202,19 @@ async def match_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         conn = get_db_connection()
         if not conn:
-            await update.message.reply_text("Database connection error!")
+            await update.message.reply_text("❌ Database connection error")
             return
             
         with conn.cursor() as cur:
-            # Get recent match performances
+            # Simplified query using only match_data
             cur.execute("""
-                SELECT mp.runs_scored, mp.wickets_taken, mp.boundaries, mp.sixes,
-                       s.match_id, s.created_at
-                FROM match_performances mp
-                JOIN scorecards s ON mp.match_id = s.match_id
-                WHERE mp.telegram_id = %s
-                ORDER BY s.created_at DESC
+                SELECT 
+                    match_id,
+                    created_at,
+                    match_data
+                FROM scorecards 
+                WHERE user_id = %s
+                ORDER BY created_at DESC
                 LIMIT 5
             """, (user_id,))
             
@@ -3243,30 +3222,28 @@ async def match_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if not matches:
                 await update.message.reply_text(
-                    "*📊 No Match History*\n"
-                    "Play some matches to see your history!",
-                    parse_mode=ParseMode.MARKDOWN_V2
+                    "📊 No Match History!\nPlay some matches to see your history!"
                 )
                 return
                 
-            history_msg = "*📊 RECENT MATCHES*\n" + MATCH_SEPARATOR + "\n\n"
+            history_msg = "📊 RECENT MATCHES\n━━━━━━━━━━━━━━\n\n"
             
             for match in matches:
-                date = match[5].strftime("%d/%m/%Y")
+                date = match[1].strftime("%d/%m/%Y")
+                match_data = json.loads(match[2]) if match[2] else {}
+                wickets = match_data.get('wickets', 0)
+                
                 history_msg += (
-                    f"*🏏 Match #{match[4]}* ({date})\n"
-                    f"Runs: *{match[0]}* | Wickets: *{match[1]}*\n"
-                    f"4s: *{match[2]}* | 6s: *{match[3]}*\n\n"
+                    f"🏏 Match {match[0]} ({date})\n"
+                    f"Result: {match_data.get('result', 'No result')}\n"
+                    f"Wickets: {wickets}\n\n"
                 )
             
-            await update.message.reply_text(
-                escape_markdown_v2_custom(history_msg),
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
+            await update.message.reply_text(history_msg)
             
     except Exception as e:
         logger.error(f"Error fetching match history: {e}")
-        await update.message.reply_text("Error fetching match history!")
+        await update.message.reply_text("❌ Error fetching match history")
     finally:
         if conn:
             return_db_connection(conn)
@@ -3356,3 +3333,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
