@@ -988,7 +988,7 @@ def init_database():
     try:
         with connection.cursor() as cursor:
             # Read and execute the SQL file
-            sql_file_path = Path(__file__).parent / "SETUP.sql"
+            sql_file_path = Path(__file__).parent / "setup_database.sql"
             if not sql_file_path.exists():
                 logger.error("setup_database.sql file not found")
                 return False
