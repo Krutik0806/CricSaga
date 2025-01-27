@@ -2995,11 +2995,14 @@ def init_database_connection():
     global db
     try:
         # Add retries for initial connection
-        max_retries = 3
-        retry_delay = 5
+        max_retries = 5
+        retry_delay = 10
         
         for attempt in range(max_retries):
             try:
+                logger.info(f"Database connection attempt {attempt + 1}")
+                logger.info(f"Connecting to: {DB_CONFIG['host']}:{DB_CONFIG['port']}")
+                
                 db = DatabaseHandler()
                 if db.check_connection():
                     logger.info("Successfully connected to database")
@@ -3009,16 +3012,17 @@ def init_database_connection():
                 time.sleep(retry_delay)
                 
             except Exception as e:
-                logger.error(f"Database connection attempt {attempt + 1} failed: {e}")
+                logger.error(f"Database connection attempt {attempt + 1} failed: {str(e)}")
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
                 continue
                 
         logger.error("All database connection attempts failed")
         return False
         
     except Exception as e:
-        logger.error(f"Database initialization failed: {e}")
+        logger.error(f"Database initialization failed: {str(e)}")
         return False
     
 
