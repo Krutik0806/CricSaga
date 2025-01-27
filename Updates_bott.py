@@ -91,25 +91,21 @@ DB_POOL_MAX = 20
 db_pool = None
 
 
-def init_db_pool():
-    """Initialize database connection pool"""
-    global db_pool
+async def init_db_pool():
     try:
-        if not all([DB_CONFIG['user'], DB_CONFIG['password'], DB_CONFIG['host']]):
-            logger.error("Database configuration missing. Please check your .env file")
-            return False
-            
-        db_pool = SimpleConnectionPool(
-            DB_POOL_MIN,
-            DB_POOL_MAX,
-            **DB_CONFIG
+        pool = await asyncpg.create_pool(
+            host=os.getenv("DB_HOST"),  # Supabase host
+            database=os.getenv("DB_NAME"),  # Supabase database name
+            user=os.getenv("DB_USER"),  # Supabase user
+            password=os.getenv("DB_PASSWORD"),  # Supabase password
+            port=int(os.getenv("DB_PORT")),  # Supabase port
+            ssl="require"  # Ensure SSL for Supabase
         )
-        logger.info("Connection pool created successfully")
-        return True
+        print("Connected to the database successfully!")
+        return pool
     except Exception as e:
-        logger.error(f"Failed to create connection pool: {e}")
-        return False
-
+        print(f"Failed to connect to the database: {e}")
+        raise
 
 def check_admin(user_id: str) -> bool:
     """Check if user is an admin"""
@@ -458,34 +454,21 @@ class DatabaseHandler:
         self._init_pool()
         self._init_tables()  # Add this line to initialize tables
 
-    def _init_pool(self) -> bool:
-        """Initialize connection pool with proper error handling"""
-        try:
-            # Get Supabase credentials from environment
-            db_config = {
-                'dbname': os.getenv('DB_NAME', 'postgres'),
-                'user': os.getenv('DB_USER'),
-                'password': os.getenv('DB_PASSWORD'),
-                'host': os.getenv('DB_HOST'),
-                'port': int(os.getenv('DB_PORT', '5432')),
-                'sslmode': 'require'
-            }
-
-            # Create connection pool
-            self.pool = SimpleConnectionPool(
-                1,  # Minimum connections
-                20, # Maximum connections
-                **db_config
-            )
-            
-            logger.info("Database pool initialized successfully")
-            return self._verify_tables()  # Verify tables after pool initialization
-            
-        except Exception as e:
-            logger.error(f"Failed to create connection pool: {e}")
-            self.pool = None
-            return False
-
+    async def init_pool():
+    try:
+        pool = await asyncpg.create_pool(
+            host=os.getenv("DB_HOST"),  # Supabase host
+            database=os.getenv("DB_NAME"),  # Supabase database name
+            user=os.getenv("DB_USER"),  # Supabase user
+            password=os.getenv("DB_PASSWORD"),  # Supabase password
+            port=int(os.getenv("DB_PORT")),  # Supabase port
+            ssl="require"  # Ensure SSL for Supabase
+        )
+        print("Connected to the database successfully!")
+        return pool
+    except Exception as e:
+        print(f"Failed to connect to the database: {e}")
+        raise
     def check_connection(self) -> bool:
         """Test database connection"""
         if not self.pool:
