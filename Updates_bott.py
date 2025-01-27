@@ -685,22 +685,44 @@ class DatabaseHandler:
             logger.error(f"Error logging command: {e}")
             return False
 
-    def save_match(self, match_data: dict) -> bool:
-        """Save match with proper error handling"""
+    async def save_match_async(self, match_data: dict) -> bool:
+        """Async version of save match with proper error handling"""
         try:
-            conn = self.get_connection()
-            if not conn:
+            connection = self.get_connection()
+            if not connection:
                 return False
 
-            with conn.cursor() as cur:
+            match_summary = {
+                'match_id': match_data.get('match_id'),
+                'user_id': match_data.get('user_id'),
+                'game_mode': match_data.get('mode', 'classic'),
+                'timestamp': datetime.now().isoformat(),
+                'teams': {
+                    'team1': match_data.get('creator_name', ''),
+                    'team2': match_data.get('joiner_name', '')
+                },
+                'innings': {
+                    'first': match_data.get('first_innings_score', 0),
+                    'second': match_data.get('score', {}).get('innings2', 0)
+                },
+                'result': match_data.get('result', ''),
+                'stats': {
+                    'boundaries': match_data.get('boundaries', 0),
+                    'sixes': match_data.get('sixes', 0),
+                    'dot_balls': match_data.get('dot_balls', 0),
+                    'best_over': match_data.get('best_over', 0)
+                }
+            }
+
+            with connection.cursor() as cur:
                 # Ensure user exists first
                 cur.execute("""
                     INSERT INTO users (telegram_id, first_name)
                     VALUES (%s, %s)
                     ON CONFLICT (telegram_id) DO NOTHING
-                """, (match_data['user_id'], match_data.get('user_name', 'Unknown')))
+                """, (match_data.get('user_id'), match_data.get('user_name', 'Unknown')))
 
-                # Save match data with properly aligned columns and values
+                # Fixed INSERT statement that matches table structure
                 cur.execute("""
                     INSERT INTO scorecards 
                     (match_id, user_id, game_mode, match_data)
@@ -708,82 +730,25 @@ class DatabaseHandler:
                     ON CONFLICT (match_id) 
                     DO UPDATE SET
                         match_data = EXCLUDED.match_data,
-                        game_mode = EXCLUDED.game_mode,
-                        created_at = CURRENT_TIMESTAMP
+                        game_mode = EXCLUDED.game_mode
                 """, (
-                    match_data['match_id'],
-                    match_data['user_id'],
-                    match_data.get('game_mode', 'classic'),
-                    json.dumps(match_data)
+                    match_summary['match_id'],
+                    match_summary['user_id'],
+                    match_summary['game_mode'],
+                    json.dumps(match_summary)
                 ))
 
-                conn.commit()
+                connection.commit()
                 return True
 
         except Exception as e:
             logger.error(f"Database save error: {e}")
-            if conn:
-                conn.rollback()
+            if connection:
+                connection.rollback()
             return False
         finally:
-            if conn:
-                self.return_connection(conn)
-
-    async def save_match(self, match_data: dict) -> bool:
-        """Save match with proper error handling"""
-        if not isinstance(match_data, dict):
-            logger.error("Invalid match_data type")
-            return False
-            
-        try:
-            conn = self.get_connection()
-            if not conn:
-                logger.error("Could not get database connection")
-                return False
-
-            with conn.cursor() as cur:
-                # Ensure user exists first
-                user_id = match_data.get('user_id')
-                user_name = match_data.get('user_name', 'Unknown')
-                
-                if not user_id:
-                    logger.error("Missing user_id in match_data")
-                    return False
-                    
-                cur.execute("""
-                    INSERT INTO users (telegram_id, first_name)
-                    VALUES (%s, %s)
-                    ON CONFLICT (telegram_id) DO NOTHING
-                """, (user_id, user_name))
-
-                # Updated INSERT statement to match columns with values
-                cur.execute("""
-                    INSERT INTO scorecards 
-                    (match_id, user_id, game_mode, match_data)
-                    VALUES (%s, %s, %s, %s::jsonb)
-                    ON CONFLICT (match_id) 
-                    DO UPDATE SET
-                        match_data = EXCLUDED.match_data,
-                        created_at = CURRENT_TIMESTAMP
-                """, (
-                    match_data.get('match_id'),
-                    user_id,
-                    match_data.get('game_mode', 'classic'),
-                    json.dumps(match_data)
-                ))
-
-                conn.commit()
-                return True
-                
-        except Exception as e:
-            logger.error(f"Error saving match: {e}")
-            if conn:
-                conn.rollback()
-            return False
-        finally:
-            if conn:
-                self.return_connection(conn)
-
+            if connection:
+                self.return_connection(connection)
 
     def get_user_matches(self, user_id: str, limit: int = 10) -> list:
         """Get user's match history"""
@@ -794,8 +759,15 @@ class DatabaseHandler:
                 
             try:
                 with conn.cursor() as cur:
+                    # Use match_data instead of direct columns
                     cur.execute("""
-                        SELECT match_id, match_data, created_at
+                        SELECT 
+                            match_id,
+                            match_data->>'timestamp' as timestamp,
+                            match_data->>'teams' as teams,
+                            match_data->>'innings1' as innings1,
+                            match_data->>'innings2' as innings2,
+                            match_data->>'result' as result
                         FROM scorecards 
                         WHERE user_id = %s
                         ORDER BY created_at DESC
@@ -807,8 +779,11 @@ class DatabaseHandler:
                         match_data = row[1] if row[1] else {}
                         matches.append({
                             'match_id': row[0],
-                            'timestamp': row[2].isoformat(),
-                            **match_data
+                            'timestamp': row[1],
+                            'teams': row[2],
+                            'innings1': row[3],
+                            'innings2': row[4],
+                            'result': row[5]
                         })
                     return matches
             finally:
@@ -958,71 +933,6 @@ class DatabaseHandler:
         finally:
             if conn:
                 self.return_connection(conn)
-
-    async def save_match_async(self, match_data: dict) -> bool:
-        """Async version of save match with proper error handling"""
-        try:
-            connection = self.get_connection()
-            if not connection:
-                return False
-
-            match_summary = {
-                'match_id': match_data.get('match_id'),
-                'user_id': match_data.get('user_id'),
-                'game_mode': match_data.get('mode', 'classic'),
-                'timestamp': datetime.now().isoformat(),
-                'teams': {
-                    'team1': match_data.get('creator_name', ''),
-                    'team2': match_data.get('joiner_name', '')
-                },
-                'innings': {
-                    'first': match_data.get('first_innings_score', 0),
-                    'second': match_data.get('score', {}).get('innings2', 0)
-                },
-                'result': match_data.get('result', ''),
-                'stats': {
-                    'boundaries': match_data.get('boundaries', 0),
-                    'sixes': match_data.get('sixes', 0),
-                    'dot_balls': match_data.get('dot_balls', 0),
-                    'best_over': match_data.get('best_over', 0)
-                }
-            }
-
-            with connection.cursor() as cur:
-                # Ensure user exists first
-                cur.execute("""
-                    INSERT INTO users (telegram_id, first_name)
-                    VALUES (%s, %s)
-                    ON CONFLICT (telegram_id) DO NOTHING
-                """, (match_data.get('user_id'), match_data.get('user_name', 'Unknown')))
-
-                # Fixed INSERT statement that matches table structure
-                cur.execute("""
-                    INSERT INTO scorecards 
-                    (match_id, user_id, game_mode, match_data)
-                    VALUES (%s, %s, %s, %s::jsonb)
-                    ON CONFLICT (match_id) 
-                    DO UPDATE SET
-                        match_data = EXCLUDED.match_data,
-                        game_mode = EXCLUDED.game_mode
-                """, (
-                    match_summary['match_id'],
-                    match_summary['user_id'],
-                    match_summary['game_mode'],
-                    json.dumps(match_summary)
-                ))
-
-                connection.commit()
-                return True
-
-        except Exception as e:
-            logger.error(f"Database save error: {e}")
-            if connection:
-                connection.rollback()
-            return False
-        finally:
-            if connection:
-                self.return_connection(connection)
 
 # Update the database initialization to use telegram_id instead of user_id
 def init_database():
@@ -2987,9 +2897,6 @@ async def handle_retry(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in handle_retry: {e}")
         await query.edit_message_text("❌ Retry failed. Please start a new game.")
 
-# Add to main():
-# application.add_handler(CallbackQueryHandler(handle_retry, pattern="^retry_"))
-
 def init_database_connection():
     """Initialize database connection with better error handling"""
     global db
@@ -3025,7 +2932,6 @@ def init_database_connection():
         logger.error(f"Database initialization failed: {str(e)}")
         return False
     
-
 async def test_db_connection(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Test database connection and schema"""
         if not check_admin(str(update.effective_user.id)):
@@ -3402,6 +3308,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
