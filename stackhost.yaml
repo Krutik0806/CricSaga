@@ -14,12 +14,10 @@ commands:
     - "python3 Updates_bott.py"
 
 env:
-    - TELEGRAM_BOT_TOKEN=8182873213:AAFIhYzdhO-AoJ63wrelZpaijt69qmawLiI
-    - BOT_ADMIN=6148665855
-
-
-    - DB_HOST=aws-0-ap-southeast-1.pooler.supabase.com
-    - DB_NAME=postgres
-    - DB_USER=postgres.mlvtakcxbwcrpyyytuob
-    - DB_PASSWORD=CW3caLbhFn9LcjOn
-    - DB_PORT=5432
+  - TELEGRAM_BOT_TOKEN=8182873213:AAFIhYzdhO-AoJ63wrelZpaijt69qmawLiI
+  - BOT_ADMIN=6148665855
+  - DB_HOST=aws-0-ap-southeast-1.pooler.supabase.com
+  - DB_NAME=postgres
+  - DB_USER=postgres.mlvtakcxbwcrpyyytuob
+  - DB_PASSWORD=CW3caLbhFn9LcjOn
+  - DB_PORT=5432
