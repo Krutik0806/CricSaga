@@ -88,7 +88,9 @@ DB_CONFIG = {
     'keepalives_idle': 30,
     'keepalives_interval': 10,
     'keepalives_count': 5,
-    'client_encoding': 'utf8'
+    'client_encoding': 'utf8',
+    'application_name': 'cricket_bot',  # Add application name
+    'options': '-c timezone=UTC'  # Set timezone
 }
 
 # Add near the top with other constants
@@ -101,13 +103,45 @@ def init_db_pool():
     """Initialize database connection pool with better error handling"""
     global db_pool
     try:
-        db_pool = SimpleConnectionPool(
-            DB_POOL_MIN,
-            DB_POOL_MAX,
-            **DB_CONFIG
-        )
-        logger.info("Connection pool created successfully")
-        return True
+        if not all([DB_CONFIG['user'], DB_CONFIG['password'], DB_CONFIG['host']]):
+            logger.error("Database configuration missing. Please check your .env file")
+            return False
+
+        # Log connection attempt
+        logger.info(f"Attempting to connect to database at {DB_CONFIG['host']}:{DB_CONFIG['port']}")
+            
+        # Create connection pool with retry logic
+        retry_count = 0
+        max_retries = 3
+        
+        while retry_count < max_retries:
+            try:
+                db_pool = SimpleConnectionPool(
+                    DB_POOL_MIN,
+                    DB_POOL_MAX,
+                    **DB_CONFIG
+                )
+                
+                # Test the connection
+                conn = db_pool.getconn()
+                with conn.cursor() as cursor:
+                    cursor.execute('SELECT 1')
+                db_pool.putconn(conn)
+                
+                logger.info("Database connection pool created successfully")
+                return True
+                
+            except Exception as e:
+                retry_count += 1
+                logger.error(f"Connection attempt {retry_count} failed: {e}")
+                if retry_count < max_retries:
+                    time.sleep(5)  # Wait 5 seconds before retrying
+                    continue
+                break
+                
+        logger.error("Failed to create connection pool after all retries")
+        return False
+        
     except Exception as e:
         logger.error(f"Failed to create connection pool: {e}")
         return False
